@@ -1,10 +1,20 @@
 package pdc;
 
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Arrays;
+
+
 
 /**
  * The Master acts as the Coordinator in a distributed cluster.
@@ -15,6 +25,23 @@ import java.util.concurrent.Executors;
  * checks.
  */
 public class Master {
+
+    class WorkerInfo {
+        Socket socket;
+        DataInputStream in;
+        DataOutputStream out;
+        long lastHeartbeat;
+    }
+
+    ConcurrentHashMap<Integer, WorkerInfo> workers = new ConcurrentHashMap<>();
+
+
+    private ServerSocket serverSocket;
+    private LinkedBlockingQueue<int[]> taskQueue = new LinkedBlockingQueue<>();
+    private ConcurrentHashMap<Integer, int[][]> results = new ConcurrentHashMap<>();
+    private AtomicInteger completedTasks = new AtomicInteger(0);
+    private int totalTasks = 0;
+
 
     private final ExecutorService systemThreads = Executors.newCachedThreadPool();
 
@@ -31,25 +58,139 @@ public class Master {
      * @param data      The raw matrix data to be processed
      */
     public Object coordinate(String operation, int[][] data, int workerCount) {
-        // TODO: Architect a scheduling algorithm that survives worker failure.
+        
         // HINT: Think about how MapReduce or Spark handles 'Task Reassignment'.
-        return null;
-    }
+        
+        int totalRows = data.length;
+        int chunkSize = totalRows/workerCount;
+        for (int startRow  = 0; startRow < totalRows; startRow += chunkSize) {
+            int endRow = Math.min(startRow + chunkSize, totalRows);
+            int [] taskData = Arrays.copyOfRange(data[startRow], 0, data[startRow].length);
+            taskQueue.add(taskData);
+            totalTasks++;
+        }
+
+            for (WorkerInfo worker : workers.values()) {
+                systemThreads.submit(() -> {
+                    try {
+
+                        int[] currenttask = taskQueue.poll();
+                        if (currenttask != null) {
+                        Message taskMsg = new Message();
+                        taskMsg.type = Message.Task;
+                        taskMsg.sender = "Master";
+
+                        ByteArrayOutputStream byteArrayOutStr = new ByteArrayOutputStream();
+                        DataOutputStream dataOutStr = new DataOutputStream(byteArrayOutStr);
+                        for (int value : currenttask) {
+                            dataOutStr.writeInt(value);
+                        }
+                        dataOutStr.flush();
+                        taskMsg.payload = byteArrayOutStr.toByteArray();
+                        
+                        synchronized (worker.out) {
+                            worker.out.write(taskMsg.pack());
+                            worker.out.flush();
+                        }
+                    }
+                } catch (IOException e) {
+                        System.err.println("Failed to send task: " + e.getMessage());
+                }
+            });
+        }
+                        
+
+             while (completedTasks.get() < totalTasks) {
+                try {
+                       Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            int [][] result = new int [totalRows] [data[0].length];
+            return result;
+    } 
+            
 
     /**
      * Start the communication listener.
      * Use your custom protocol designed in Message.java.
      */
     public void listen(int port) throws IOException {
-        // TODO: Implement the listening logic using the custom 'Message.pack/unpack'
-        // methods.
+        reconcileState();
+        serverSocket = new ServerSocket(port);
+        System.out.println("Master listening on port " + port);
+
+         while (true) {
+        Socket socket = serverSocket.accept();
+        systemThreads.submit(() -> {
+            try {
+                DataInputStream in = new DataInputStream(socket.getInputStream());
+                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                
+                
+                Message response = Message.unpack(in);
+                
+                Message ackMsg = new Message();
+                ackMsg.type = Message.ack;
+                out.write(ackMsg.pack());
+                out.flush();
+
+                WorkerInfo info = new WorkerInfo();
+                info.socket = socket;
+                info.in = in;
+                info.out = out;
+                info.lastHeartbeat = System.currentTimeMillis();
+
+                workers.put(response.workerId, info);
+
+                while(true) {
+                    Message msg = Message.unpack(in);
+                    if (msg.type.equals(Message.Heartbeat)) {
+                        info.lastHeartbeat = System.currentTimeMillis();
+                    } else if (msg.type.equals(Message.Response)) {
+                        completedTasks.incrementAndGet();
+                }
+            }
+        }
+            catch (IOException e) {
+                System.err.println("Error handling worker connection: " + e.getMessage());
+            }
+        });
+    
     }
+}
+
 
     /**
      * System Health Check.
      * Detects dead workers and re-integrates recovered workers.
      */
     public void reconcileState() {
-        // TODO: Implement cluster state reconciliation.
+        Thread monitor = new Thread(() -> {
+            while (true) {
+                for (ConcurrentHashMap.Entry<Integer, WorkerInfo> entry : workers.entrySet()) {
+                    int workerId = entry.getKey();
+                    WorkerInfo info = entry.getValue();
+
+                    System.out.println("Current time: " + System.currentTimeMillis());
+                    System.out.println("Last heartbeat: " + info.lastHeartbeat);
+                    if (System.currentTimeMillis() - info.lastHeartbeat > 5000) {
+                        System.out.println("Worker " + workerId + " is dead.");
+                        workers.remove(workerId);
+                    }
+
+                }
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }); 
+        monitor.setDaemon(true);
+        monitor.start();
     }
 }
