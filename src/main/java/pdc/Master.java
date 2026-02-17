@@ -102,7 +102,7 @@ public class Master {
 
              while (completedTasks.get() < totalTasks) {
                 try {
-                       Thread.sleep(100);
+                       Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -117,52 +117,73 @@ public class Master {
      * Start the communication listener.
      * Use your custom protocol designed in Message.java.
      */
+    
     public void listen(int port) throws IOException {
         reconcileState();
         serverSocket = new ServerSocket(port);
+        serverSocket.setSoTimeout(1000);
         System.out.println("Master listening on port " + port);
+        
+        systemThreads.submit(new Runnable()  {
+           public void run(){
+                while (true){
+                    try{
+                       Socket socket = serverSocket.accept();
+                       handleWorkerConnection(socket);
+                   } catch (java.net.SocketTimeoutException e) {
+                     continue;
 
-         while (true) {
-        Socket socket = serverSocket.accept();
-        systemThreads.submit(() -> {
-            try {
-                DataInputStream in = new DataInputStream(socket.getInputStream());
-                DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                   } catch (IOException e) {
+                       System.err.println("error accepting connection: " + e.getMessage());
+                     break;
+               }
+            }
+       }
+    });
+}
+
+private void handleWorkerConnection(Socket socket){
+    try{        
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                 
                 
-                Message response = Message.unpack(in);
+        Message response = Message.unpack(in);
                 
-                Message ackMsg = new Message();
-                ackMsg.type = Message.ack;
-                out.write(ackMsg.pack());
-                out.flush();
+        Message ackMsg = new Message();
+        ackMsg.type = Message.ack;
+        out.write(ackMsg.pack());
+        out.flush();
 
-                WorkerInfo info = new WorkerInfo();
-                info.socket = socket;
-                info.in = in;
-                info.out = out;
-                info.lastHeartbeat = System.currentTimeMillis();
+        WorkerInfo info = new WorkerInfo();
+        info.socket = socket;
+        info.in = in;
+        info.out = out;
+        info.lastHeartbeat = System.currentTimeMillis();
 
-                workers.put(response.workerId, info);
+        workers.put(response.workerId, info);
+        
 
+        systemThreads.submit(() -> handleWorkerMessages(info));
+
+    } catch (IOException e) {
+        System.err.println("Error: " + e.getMessage());
+    }
+}
+        private void handleWorkerMessages(WorkerInfo info){
+             try{
                 while(true) {
-                    Message msg = Message.unpack(in);
+                    Message msg = Message.unpack(info.in);
                     if (msg.type.equals(Message.Heartbeat)) {
                         info.lastHeartbeat = System.currentTimeMillis();
                     } else if (msg.type.equals(Message.Response)) {
                         completedTasks.incrementAndGet();
+                    }
                 }
+            } catch (IOException e) {
+                System.err.println("Worker connection lost:" + e.getMessage());
             }
         }
-            catch (IOException e) {
-                System.err.println("Error handling worker connection: " + e.getMessage());
-            }
-        });
-    
-    }
-}
-
-
     /**
      * System Health Check.
      * Detects dead workers and re-integrates recovered workers.
