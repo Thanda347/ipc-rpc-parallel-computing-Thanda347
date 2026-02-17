@@ -31,6 +31,7 @@ public class Master {
         DataInputStream in;
         DataOutputStream out;
         long lastHeartbeat;
+        int workerId;
     }
 
     ConcurrentHashMap<Integer, WorkerInfo> workers = new ConcurrentHashMap<>();
@@ -60,7 +61,14 @@ public class Master {
      * @param data      The raw matrix data to be processed
      */
     public Object coordinate(String operation, int[][] data, int workerCount) {
-        
+        if (data == null || data.length == 0 || data[0] == null || workerCount <=0) {
+          return null;
+
+
+        }
+        if (workerCount > data.length) {
+            workerCount = data.length;
+        }
         // HINT: Think about how MapReduce or Spark handles 'Task Reassignment'.
         
         int totalRows = data.length;
@@ -101,12 +109,14 @@ public class Master {
             });
         }
                         
-
+            long startWait = System.currentTimeMillis();
              while (completedTasks.get() < totalTasks) {
+                if (System.currentTimeMillis() - startWait > 10000) break;
                 try {
-                       Thread.sleep(1000);
+                       Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    break;
                 }
             }
 
@@ -176,6 +186,7 @@ private void handleWorkerConnection(Socket socket){
              try{
                 while(listening) {
                     Message msg = Message.unpack(info.in);
+                    if (msg == null) break;
                     if (msg.type.equals(Message.Heartbeat)) {
                         info.lastHeartbeat = System.currentTimeMillis();
                     } else if (msg.type.equals(Message.Response)) {
@@ -184,6 +195,8 @@ private void handleWorkerConnection(Socket socket){
                 }
             } catch (IOException e) {
                 System.err.println("Worker connection lost:" + e.getMessage());
+            } finally {
+                workers.remove(info.workerId);
             }
         }
     /**
