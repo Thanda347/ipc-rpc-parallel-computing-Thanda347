@@ -59,8 +59,9 @@ public class Worker {
         this.out = new DataOutputStream(this.socket.getOutputStream());
         this.in = new DataInputStream(this.socket.getInputStream());
 
-        
-       Message msg = new Message();
+        this.workerId = (int) (System.currentTimeMillis() % 10000) + (int)(Math.random() * 1000);
+
+        Message msg = new Message();
         msg.type = Message.Register;
         msg.sender = String.valueOf(workerId);
         msg.workerId = workerId;
@@ -72,20 +73,30 @@ public class Worker {
         Message response = Message.unpack(in);
         if (response.type.equals(Message.ack)) {
             System.out.println("Registration successful");
+        
+        } else {
+            System.err.println("Registration failed");
+            return;
         }
+          
         Thread heartbeat = new Thread(() -> {
             while (running){
-                       try {
+                try {
                     Message hbMsg = new Message();
                     hbMsg.type = Message.Heartbeat;
                     hbMsg.sender = String.valueOf(workerId);
                     hbMsg.workerId = workerId;
+
+                    synchronized (out) {
                     out.write(hbMsg.pack());
                     out.flush();
-                    Thread.sleep(2000); 
+                    }
+
+                    Thread.sleep(1000); 
                 } catch (IOException | InterruptedException e) {
                     System.err.println("Heartbeat failed: " + e.getMessage());
                     running = false;
+                    break;
                 }
             }
         });
@@ -96,25 +107,33 @@ public class Worker {
         while (running) {
             try{
                 Message taskMsg =Message.unpack(in);
-                if (taskMsg.type.equals(Message.Task)) {
-                    threadPool.submit(() -> execute(taskMsg)); 
-            } else if (taskMsg.type.equals(Message.Shutdown)) {
+                if (taskMsg == null) {
+                    System.out.println("Connection closed by master");
+                    break;
+                }
+
+             if (taskMsg.type.equals(Message.Task)) {
+                final Message finalTaskMsg = taskMsg;
+                threadPool.submit(() -> execute(finalTaskMsg));
+             }else if (taskMsg.type.equals(Message.Shutdown)) {
+                System.out.println("Received shutdown command");
+             
                 running = false;
                 break;
             } 
             
-        } catch (IOException e) {
+        }
+
+         threadPool.shutdown();
+         socket.close();
+         System.out.println("Worker" + workerId + "shut down");
+    }
+         catch (IOException e) {
             System.err.println("Lost connection: " + e.getMessage());
-            running = false;
-            break;
+            throw e;
         }
     }
-    threadPool.shutdown();
-    socket.close();
-    } catch (IOException e) {
-        System.err.println("Failed to connect to Master: " + e.getMessage());
-    }  
-}
+    
 /**
      * 
      * Executes a received task block.
@@ -134,58 +153,55 @@ public class Worker {
 
     public void execute( Message Task) {
         long startTime = System.currentTimeMillis();
-        System.out.println("Starting execution of task " + startTime);
+        System.out.println("Worker " + workerId + "starting task" + task.taskId);
+
         ByteArrayInputStream byteArrayInpStr = new ByteArrayInputStream(Task.payload);
         DataInputStream dataInpStr = new DataInputStream(byteArrayInpStr);
 
         try{
             int startRow = dataInpStr.readInt();
             int endRow = dataInpStr.readInt();
-            int colsA = dataInpStr.readInt();
-            int colsB = dataInpStr.readInt();
+            int cols = dataInpStr.readInt();
            
 
             int rows = endRow -startRow;
-            double[][] A = new double[rows][colsA];
-
+            
+             
+            int[][] matrixData = new int[rows][cols];
             for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < colsA; c++) {
-                    A[r][c] = dataInpStr.readDouble();
+                for (int c = 0; c < cols; c++) {
+                    matrixData[r][c] = dataInpStr.readInt();
+                    
                 }
             }
 
-            double[][] B = new double[colsA][colsB];
-            for (int r = 0; r < colsA; r++) {
-                for (int c = 0; c < colsB; c++) {
-                    B[r][c] = dataInpStr.readDouble();
-                }
-            }
-             double [][] result = new double[rows] [colsB];
+            int[][] result = new int[rows][cols];
             for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < colsB; c++) {
-                    for (int k = 0; k < colsA; k++) {
-                        result[r][c]+= A[r][k] * B[k][c];
-                    }
+                for (int c = 0; c < cols; c++) {
+                    result[r][c] = matrixData[r][c] * 2;
                 }
             }
+             
             long endTime = System.currentTimeMillis();
             System.out.println("Task" + Task.taskId + "done in:" +(endTime- startTime) + "ms");
-             Message resultMsg = new Message();
-             resultMsg.type = Message.Response;
-             resultMsg.sender = String.valueOf(workerId);
-             resultMsg.workerId = workerId;
-             resultMsg.taskId = Task.taskId;
+            
+            
+            Message resultMsg = new Message();
+            resultMsg.type = Message.Response;
+            resultMsg.sender = String.valueOf(workerId);
+            resultMsg.workerId = workerId;
+            resultMsg.taskId = Task.taskId;
 
-             ByteArrayOutputStream byteArrayOutStr = new ByteArrayOutputStream();
-             DataOutputStream dataOutStr = new DataOutputStream(byteArrayOutStr);
+            ByteArrayOutputStream byteArrayOutStr = new ByteArrayOutputStream();
+            DataOutputStream dataOutStr = new DataOutputStream(byteArrayOutStr);
 
-             dataOutStr.writeInt(startRow);
-             dataOutStr.writeInt(endRow);
-             dataOutStr.writeInt(colsB);
+            dataOutStr.writeInt(startRow);
+            dataOutStr.writeInt(endRow);
+            dataOutStr.writeInt(cols);
 
              for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < colsB; c++) {
-                    dataOutStr.writeDouble(result[r][c]);
+                for (int c = 0; c < cols; c++) {
+                    dataOutStr.writeInt(result[r][c]);
                 }
             }
             dataOutStr.flush();
@@ -195,6 +211,10 @@ public class Worker {
                 out.write(resultMsg.pack());
                 out.flush();
              }
+
+             System.out.println("sent result for task" + task.taskId);
+
+
         } catch (IOException e) {
             System.err.println("Error executing task: " + e.getMessage());
         }

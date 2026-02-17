@@ -1,6 +1,7 @@
 package pdc;
 
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -13,6 +14,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Arrays;
+import java.util.Map;
 
 
 
@@ -72,11 +74,29 @@ public class Master {
         // HINT: Think about how MapReduce or Spark handles 'Task Reassignment'.
         
         int totalRows = data.length;
-        int chunkSize = totalRows/workerCount;
+        int cols = data[0].length;
+
+        taskQueue.clear();
+        results.clear();
+        completedTasks.set(0);
+        totalTasks = 0;
+
+        int chunkSize = (int) Math.ceil ((double) totalRows / workerCount);
+
+
         for (int startRow  = 0; startRow < totalRows; startRow += chunkSize) {
             int endRow = Math.min(startRow + chunkSize, totalRows);
-            int [] taskData = Arrays.copyOfRange(data[startRow], 0, data[startRow].length);
-            taskQueue.add(taskData);
+            int rowsInChunk = endRow -startRow;
+
+
+            int [] taskChunk = new int[rowsInChunk] [cols];
+            for ( int i = 0; i < rowsInChunk; i++) {
+                taskChunk[i] = Arrays.copyOf(data[startRow + i],  cols);
+
+            }
+              TaskInfo taskInfo = new TaskInfo(totalTasks, startRow, endRow, taskChunk);
+
+            taskQueue.add(taskInfo);
             totalTasks++;
         }
 
@@ -84,17 +104,26 @@ public class Master {
                 systemThreads.submit(() -> {
                     try {
 
-                        int[] currenttask = taskQueue.poll();
-                        if (currenttask != null) {
+                        TaskInfo task = taskQueue.poll();
+
+                        if (task != null) {
                         Message taskMsg = new Message();
                         taskMsg.type = Message.Task;
                         taskMsg.sender = "Master";
+                        taskMsg.taskId = task.taskId;
 
                         ByteArrayOutputStream byteArrayOutStr = new ByteArrayOutputStream();
                         DataOutputStream dataOutStr = new DataOutputStream(byteArrayOutStr);
-                        for (int value : currenttask) {
-                            dataOutStr.writeInt(value);
+
+                        dataOutStr.writeInt(task.startRow);
+                        dataOutStr.writeInt(task.endRow);
+                        dataOutStr.writeInt(cols);
+
+                        for (int r = 0; r < task.data.length; r++) {
+                            for (int c = 0; c < cols; c++){
+                            dataOutStr.writeInt(task.data[r][c]);
                         }
+                    }
                         dataOutStr.flush();
                         taskMsg.payload = byteArrayOutStr.toByteArray();
                         
@@ -102,6 +131,7 @@ public class Master {
                             worker.out.write(taskMsg.pack());
                             worker.out.flush();
                         }
+                         System.out.println("Sent task" + task.taskId + "to worker");
                     }
                 } catch (IOException e) {
                         System.err.println("Failed to send task: " + e.getMessage());
@@ -110,8 +140,15 @@ public class Master {
         }
                         
             long startWait = System.currentTimeMillis();
+            long timeout = 30000;
+
+
              while (completedTasks.get() < totalTasks) {
-                if (System.currentTimeMillis() - startWait > 10000) break;
+                if (System.currentTimeMillis() - startWait > timeout) {
+                    System.err.println("Timeout waiting for tasks");
+                 break;
+                }
+
                 try {
                        Thread.sleep(100);
                 } catch (InterruptedException e) {
@@ -120,10 +157,42 @@ public class Master {
                 }
             }
 
-            int [][] result = new int [totalRows] [data[0].length];
+            int [][] result = new int [totalRows] [cols];
+
+            for (int i = 0; i < totalTasks; i++){
+                int [][] taskResult = results.get(i);
+                if (taskResult != null) {
+                    for (Map.Entr<Integer, int[][]> entry : results.entrySet()) {
+                        int taskId = entry.getKey();
+                        int [][] taskData = entry.getValue();
+
+                        int taskStartRow = taskId * chunkSize;
+                        for (int r = 0; r < taskData.length; r++ ) {
+                            if (taskStartRow + r <totalRows) {
+                                result[taskStartRow + r] = taskData[r];
+                            }
+                        }
+                    }
+                } else {
+                    System.err.println("Missing result for task" + i);
+                }
+            }
             return result;
     } 
-            
+        
+    private static class TaskInfo {
+        int taskId;
+        int startRow;
+        int endRow;
+        int [][] data;
+
+        TaskInfo(int id, int start, int end, int [][] taskData) {
+            this.taskId = id;
+            this.startRow = start;
+            this.endRow = end;
+            this.data = taskData;
+        }
+    }
 
     /**
      * Start the communication listener.
@@ -186,26 +255,57 @@ private void handleWorkerConnection(Socket socket){
              try{
                 while(listening) {
                     Message msg = Message.unpack(info.in);
-                    if (msg == null) break;
+                    if (msg == null) {
+                        System.out.println("Worker" + info.workerId + "closed connection");
+                        break;
+                    }
+
                     if (msg.type.equals(Message.Heartbeat)) {
                         info.lastHeartbeat = System.currentTimeMillis();
                     } else if (msg.type.equals(Message.Response)) {
-                        completedTasks.incrementAndGet();
+
+                        try {
+                            ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(msg.payload);
+                            DataInputStream dataInputStream = new DataInputStream(byteArrayInputStream);
+
+                             int startRow = dataInputStream.readInt();
+                    int endRow = dataInputStream.readInt();
+                    int cols = dataInputStream.readInt();
+                    
+                    int rows = endRow - startRow;
+                    int[][] resultChunk = new int[rows][cols];
+                    
+                    for (int r = 0; r < rows; r++) {
+                        for (int c = 0; c < cols; c++) {
+                            resultChunk[r][c] = dataInputStream.readInt();
+                        }
                     }
-                }
-            } catch (IOException e) {
-                System.err.println("Worker connection lost:" + e.getMessage());
-            } finally {
-                workers.remove(info.workerId);
+                     
+                    results.put(msg.taskId, resultChunk);
+                    completedTasks.incrementAndGet();
+                    
+                    System.out.println("Received result for task " + msg.taskId + " from worker " + info.workerId);
+                    
+                } catch (IOException e) {
+                    System.err.println("Failed to parse result: " + e.getMessage());
+                        
             }
         }
+    }
+}catch (IOException e) {
+        System.err.println("Worker connection lost: " + e.getMessage());
+    } finally {
+        workers.remove(info.workerId);
+        System.out.println("Worker " + info.workerId + " removed");
+    }
+}
     /**
      * System Health Check.
      * Detects dead workers and re-integrates recovered workers.
      */
     public void reconcileState() {
         Thread monitor = new Thread(() -> {
-            while (true) {
+            while (listening) {
                 for (ConcurrentHashMap.Entry<Integer, WorkerInfo> entry : workers.entrySet()) {
                     int workerId = entry.getKey();
                     WorkerInfo info = entry.getValue();
@@ -219,7 +319,7 @@ private void handleWorkerConnection(Socket socket){
 
                 }
                 try {
-                    Thread.sleep(2000);
+                    Thread.sleep(100);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
