@@ -41,6 +41,8 @@ public class Master {
     private ConcurrentHashMap<Integer, int[][]> results = new ConcurrentHashMap<>();
     private AtomicInteger completedTasks = new AtomicInteger(0);
     private int totalTasks = 0;
+    private volatile boolean listening = true;
+
 
 
     private final ExecutorService systemThreads = Executors.newCachedThreadPool();
@@ -126,7 +128,7 @@ public class Master {
         
         systemThreads.submit(new Runnable()  {
            public void run(){
-                while (true){
+                while (listening){
                     try{
                        Socket socket = serverSocket.accept();
                        handleWorkerConnection(socket);
@@ -172,7 +174,7 @@ private void handleWorkerConnection(Socket socket){
 }
         private void handleWorkerMessages(WorkerInfo info){
              try{
-                while(true) {
+                while(listening) {
                     Message msg = Message.unpack(info.in);
                     if (msg.type.equals(Message.Heartbeat)) {
                         info.lastHeartbeat = System.currentTimeMillis();
